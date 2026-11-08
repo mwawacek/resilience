@@ -573,6 +573,41 @@ describe('ResilienceModule', () => {
       expect(stages[1]).toMatchObject({ timeout: 1_000 });
     });
 
+    it('keeps module defaults for fields a preset or create() leaves undefined', async () => {
+      // Values as configuration gives them: a setting that is not set is undefined.
+      const env: Record<string, string | undefined> = {};
+      const moduleRef = await boot(
+        {
+          defaults: {
+            circuitBreaker: { minimumCalls: 1, openDuration: '1m' },
+            bulkhead: { maxConcurrent: 2 },
+            retry: { attempts: 4, backoff: { delay: '1s', jitter: 'none' } },
+          },
+          presets: {
+            carrier: {
+              circuitBreaker: { minimumCalls: env.CARRIER_MIN_CALLS as number | undefined },
+              bulkhead: { maxConcurrent: env.CARRIER_MAX_CONCURRENT as number | undefined },
+              retry: { backoff: { delay: env.CARRIER_DELAY as `${number}ms` | undefined } },
+            },
+          },
+        },
+        {},
+      );
+      const resilience = moduleRef.get(ResilienceService);
+      expect(resilience.circuitBreaker('carrier').options).toMatchObject({ minimumCalls: 1, openDuration: 60_000 });
+      expect(resilience.bulkhead('carrier').maxConcurrent).toBe(2);
+
+      const retry = (resilience.preset('carrier') as PolicyWrap).policies[0] as RetryPolicy;
+      const events = recordEvents();
+      await expect(
+        retry.execute(() => Promise.reject(new Error('down')), { signal: AbortSignal.timeout(50) }),
+      ).rejects.toThrow();
+      expect(events[0]).toMatchObject({ type: 'retry', delayMs: 1_000 });
+
+      const created = resilience.create({ bulkhead: { maxConcurrent: env.MAX_CONCURRENT as number | undefined } });
+      expect(((created as PolicyWrap).policies[0] as BulkheadPolicy).maxConcurrent).toBe(2);
+    });
+
     it('the options are injectable as RESILIENCE_MODULE_OPTIONS, and tests can override them', async () => {
       const options = { presets: { carrier: { circuitBreaker: { openDuration: '30s' as const } } } };
       expect((await boot(options, {})).get(RESILIENCE_MODULE_OPTIONS)).toEqual(options);
